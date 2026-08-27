@@ -1,0 +1,29 @@
+﻿
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.Python
+venv/
+env/
+
+# Exclude synthea folder
+synthea/
+
+# EXCLUDE ALL JSON FILES (outputs)
+*.json
+
+# EXCLUDE DATABASE
+*.db
+
+# EXCLUDE INTERMEDIATE/LARGE FILES
+.venv/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+
+# Virtual environments
+venv/
+ENV/
