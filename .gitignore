@@ -27,3 +27,4 @@ Thumbs.db
 # Virtual environments
 venv/
 ENV/
+fhir_data.legacy.bak

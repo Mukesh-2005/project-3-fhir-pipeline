@@ -1,87 +1,213 @@
-﻿import json
+#!/usr/bin/env python3
+"""
+CLINICAL QUERIES OVER THE PERSISTED FHIR DATA
+
+Reads the database written by stage 6. Nothing here is hardcoded: the
+validation status is read back from the stage 5 output rather than asserted,
+and every count comes from the database.
+"""
+
+import json
 import sqlite3
+import sys
+from pathlib import Path
 
-conn = sqlite3.connect('fhir_data.db')
-cursor = conn.cursor()
+# Keep the checkmarks printable when stdout is redirected to a file or a
+# pipe, which on Windows defaults to cp1252 and cannot encode them.
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
-results = {}
+DB_PATH = 'fhir_data.db'
+FHIR_PATH = 'whitfield_fhir.json'
+OUTPUT_PATH = 'clinical_queries_results.json'
 
-# Query 1: All conditions with ICD-10 codes
-print('\nQUERY 1: All Conditions with ICD-10 Codes')
-print('='*70)
-cursor.execute('SELECT DISTINCT code, display FROM conditions ORDER BY display')
-conditions = cursor.fetchall()
-results['query_1_conditions'] = [{'code': c[0], 'display': c[1]} for c in conditions]
-print(f'Found {len(conditions)} unique conditions:')
-for code, display in conditions[:15]:
-    print(f'  [{code}] {display}')
-if len(conditions) > 15:
-    print(f'  ... and {len(conditions)-15} more')
-print()
+# Shown instead of the full URL, which is too wide for a terminal table.
+SYSTEM_NAMES = {
+    'http://hl7.org/fhir/sid/icd-10-cm': 'ICD-10-CM',
+    'http://snomed.info/sct': 'SNOMED CT',
+    'http://loinc.org': 'LOINC',
+    'http://www.nlm.nih.gov/research/umls/rxnorm': 'RxNorm',
+}
 
-# Query 2: All medications with doses
-print('QUERY 2: Medications with Doses and Status')
-print('='*70)
-cursor.execute('SELECT DISTINCT drug_name, code, dose, status FROM medications ORDER BY drug_name')
-meds = cursor.fetchall()
-results['query_2_medications'] = [{'drug': m[0], 'code': m[1], 'dose': m[2], 'status': m[3]} for m in meds]
-print(f'Found {len(meds)} unique medications:')
-for drug, code, dose, status in meds[:15]:
-    print(f'  {drug} ({code}) - {dose} - {status}')
-if len(meds) > 15:
-    print(f'  ... and {len(meds)-15} more')
-print()
 
-# Query 3: All lab observations with values
-print('QUERY 3: Laboratory Results with Values')
-print('='*70)
-cursor.execute('SELECT display, value, unit FROM observations WHERE value IS NOT NULL ORDER BY display')
-labs = cursor.fetchall()
-results['query_3_labs'] = [{'test': l[0], 'value': l[1], 'unit': l[2]} for l in labs]
-print(f'Found {len(labs)} lab observations with values:')
-for test, value, unit in labs[:15]:
-    print(f'  {test}: {value} {unit}')
-if len(labs) > 15:
-    print(f'  ... and {len(labs)-15} more')
-print()
+def system_name(url):
+    """A short label for a code system URL."""
+    if not url:
+        return 'uncoded'
+    return SYSTEM_NAMES.get(url, url.rsplit('/', 1)[-1])
 
-# Query 4: Conditions by category (spine/neuro/trauma)
-print('QUERY 4: Conditions by Category')
-print('='*70)
-cursor.execute('SELECT code, COUNT(*) as freq FROM conditions GROUP BY code ORDER BY freq DESC')
-code_freq = cursor.fetchall()
-print(f'Top ICD-10 codes by frequency:')
-for code, freq in code_freq[:10]:
-    print(f'  [{code}]: {freq} occurrences')
-print()
 
-# Query 5: Summary statistics
-print('QUERY 5: Pipeline Summary Statistics')
-print('='*70)
-cursor.execute('SELECT COUNT(DISTINCT id) FROM conditions')
-cond_count = cursor.fetchone()[0]
-cursor.execute('SELECT COUNT(DISTINCT id) FROM medications')
-med_count = cursor.fetchone()[0]
-cursor.execute('SELECT COUNT(DISTINCT id) FROM observations')
-obs_count = cursor.fetchone()[0]
-cursor.execute('SELECT COUNT(DISTINCT id) FROM patients')
-pat_count = cursor.fetchone()[0]
+def heading(number, title):
+    print(f'\nQUERY {number}: {title}')
+    print('=' * 70)
 
-print(f'Patient records: {pat_count}')
-print(f'Conditions coded: {cond_count}')
-print(f'Medications administered: {med_count}')
-print(f'Laboratory observations: {obs_count}')
-print(f'Total structured facts: {cond_count + med_count + obs_count}')
-print(f'FHIR validation: PASS')
-print()
 
-conn.close()
+def show(rows, formatter, limit=15):
+    """Print up to `limit` rows, saying how many were withheld."""
+    for row in rows[:limit]:
+        print(f'  {formatter(row)}')
+    if len(rows) > limit:
+        print(f'  ... and {len(rows) - limit} more')
 
-# Save results
-with open('clinical_queries_results.json', 'w') as f:
-    json.dump(results, f, indent=2)
 
-print('='*70)
-print('✓ All 5 clinical queries demonstrated!')
-print('✓ Results saved to clinical_queries_results.json')
-print('='*70)
+def validation_status(path=FHIR_PATH):
+    """
+    The validation result recorded by stage 5.
+
+    Read back rather than assumed: this script used to print "FHIR validation:
+    PASS" unconditionally, which said nothing about the data.
+    """
+    if not Path(path).exists():
+        return f'unknown ({path} not found)'
+
+    with open(path, encoding='utf-8') as handle:
+        validation = json.load(handle).get('validation', {})
+
+    valid = validation.get('valid')
+    validator = validation.get('validator', 'unknown validator')
+    if valid is True:
+        return f'PASS ({validator})'
+    if valid is None:
+        return f'NOT VALIDATED ({validator})'
+    return f'FAIL - {validation.get("error_count", "?")} error(s) ({validator})'
+
+
+def main():
+    if not Path(DB_PATH).exists():
+        print(f'ERROR: {DB_PATH} not found. Run stage6_.py first.')
+        return 1
+
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    # A schema older than stage 6's current layout lacks the columns below.
+    columns = {row[1] for row in cursor.execute('PRAGMA table_info(conditions)')}
+    if 'system' not in columns:
+        print('ERROR: database predates the current schema. Re-run stage6_.py.')
+        conn.close()
+        return 1
+
+    results = {'validation': validation_status()}
+
+    # Query 1: conditions, with the system each code actually belongs to.
+    heading(1, 'Conditions with Codes and Code Systems')
+    cursor.execute('''
+        SELECT DISTINCT code, system, display FROM conditions ORDER BY display
+    ''')
+    conditions = cursor.fetchall()
+    results['query_1_conditions'] = [
+        {'code': c, 'system': s, 'display': d} for c, s, d in conditions]
+    print(f'Found {len(conditions)} unique conditions:')
+    show(conditions, lambda r: f'[{r[0] or "-":<10}] {system_name(r[1]):<10} {r[2]}')
+
+    # Query 2: medications.
+    heading(2, 'Medications with Doses and Status')
+    cursor.execute('''
+        SELECT DISTINCT drug_name, code, system, dose, status
+        FROM medications ORDER BY drug_name
+    ''')
+    meds = cursor.fetchall()
+    results['query_2_medications'] = [
+        {'drug': d, 'code': c, 'system': s, 'dose': dose, 'status': st}
+        for d, c, s, dose, st in meds]
+    print(f'Found {len(meds)} unique medications:')
+    show(meds, lambda r: f'{r[0]} [{r[1] or "-"}] {r[3] or "no dose"} - {r[4]}')
+
+    # Query 3: observations. Paired readings (blood pressure) and qualitative
+    # findings live in value_text, so filtering on `value` alone hid them.
+    heading(3, 'Observations with Results')
+    cursor.execute('''
+        SELECT display, value, unit, value_text, date
+        FROM observations
+        WHERE value IS NOT NULL OR value_text IS NOT NULL
+        ORDER BY date, display
+    ''')
+    labs = cursor.fetchall()
+    results['query_3_observations'] = [
+        {'test': t, 'value': v, 'unit': u, 'value_text': vt, 'date': d}
+        for t, v, u, vt, d in labs]
+
+    cursor.execute('SELECT COUNT(*) FROM observations')
+    total_obs = cursor.fetchone()[0]
+    print(f'Found {len(labs)} of {total_obs} observations carrying a result:')
+    show(labs, lambda r: f'{(r[4] or "")[:10]:<11}{r[0]}: '
+                         f'{r[1] if r[1] is not None else r[3]} {r[2] or ""}'.rstrip())
+
+    # Query 4: code frequency.
+    heading(4, 'Conditions by Code Frequency')
+    cursor.execute('''
+        SELECT code, system, COUNT(*) AS freq FROM conditions
+        GROUP BY code, system ORDER BY freq DESC, code
+    ''')
+    frequency = cursor.fetchall()
+    results['query_4_code_frequency'] = [
+        {'code': c, 'system': s, 'count': n} for c, s, n in frequency]
+    print(f'{len(frequency)} distinct codes:')
+    show(frequency, lambda r: f'[{r[0] or "-":<10}] {system_name(r[1]):<10} {r[2]} occurrence(s)',
+         limit=10)
+
+    # Query 5: the clinical timeline. This only became answerable once facts
+    # carried the document's own date instead of the pipeline's run time.
+    heading(5, 'Clinical Timeline by Encounter')
+    cursor.execute('''
+        SELECT e.start, e.type,
+               (SELECT COUNT(*) FROM conditions c WHERE c.encounter_id = e.id),
+               (SELECT COUNT(*) FROM observations o WHERE o.encounter_id = e.id)
+        FROM encounters e
+        ORDER BY COALESCE(e.start, '9999'), e.type
+    ''')
+    timeline = cursor.fetchall()
+    results['query_5_timeline'] = [
+        {'date': (start or '')[:10] or None, 'type': kind,
+         'conditions': nc, 'observations': no}
+        for start, kind, nc, no in timeline]
+    dated = sum(1 for row in timeline if row[0])
+    print(f'{len(timeline)} encounters ({dated} dated):')
+    show(timeline,
+         lambda r: f'{(r[0] or "undated")[:10]:<11}{r[1]:<20}'
+                   f'{r[2]:>3} conditions, {r[3]:>3} observations',
+         limit=20)
+
+    # Query 6: summary.
+    heading(6, 'Pipeline Summary Statistics')
+    counts = {}
+    for table in ('patients', 'encounters', 'conditions', 'medications', 'observations'):
+        cursor.execute(f'SELECT COUNT(*) FROM {table}')
+        counts[table] = cursor.fetchone()[0]
+
+    cursor.execute('SELECT COUNT(*) FROM conditions WHERE code IS NULL')
+    counts['conditions_uncoded'] = cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(DISTINCT source) FROM patients")
+    counts['sources'] = cursor.fetchone()[0]
+    cursor.execute('SELECT MIN(start), MAX(start) FROM encounters WHERE start IS NOT NULL')
+    earliest, latest = cursor.fetchone()
+
+    facts = counts['conditions'] + counts['medications'] + counts['observations']
+    results['query_6_summary'] = dict(counts, total_facts=facts,
+                                      earliest=earliest, latest=latest)
+
+    print(f'Source records:          {counts["sources"]}')
+    print(f'Patient records:         {counts["patients"]}')
+    print(f'Encounters:              {counts["encounters"]}')
+    print(f'Conditions coded:        {counts["conditions"]}')
+    print(f'Medications:             {counts["medications"]}')
+    print(f'Observations:            {counts["observations"]}')
+    print(f'Total structured facts:  {facts}')
+    if earliest and latest:
+        print(f'Clinical date range:     {earliest[:10]} to {latest[:10]}')
+    print(f'FHIR validation:         {results["validation"]}')
+
+    conn.close()
+
+    with open(OUTPUT_PATH, 'w', encoding='utf-8') as handle:
+        json.dump(results, handle, indent=2)
+
+    print('\n' + '=' * 70)
+    print('✓ All 6 clinical queries demonstrated')
+    print(f'✓ Results saved to {OUTPUT_PATH}')
+    print('=' * 70)
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

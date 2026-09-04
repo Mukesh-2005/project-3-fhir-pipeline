@@ -1,9 +1,9 @@
 # Project 3 Audit: Issues Found & Fixed
 
 ## Summary
-- **Found:** 10 bugs
+- **Found:** 11 bugs
 - **Fixed:** 6 critical
-- **Remaining:** 4 known (documented)
+- **Remaining:** 5 known (documented)
 
 ---
 
@@ -20,19 +20,31 @@
 
 ---
 
-## 4 Remaining Issues
+## 5 Remaining Issues
 
-1. **40 unmapped facts** (13 conditions, 6 meds, 21 labs)
+1. **Extraction is not reproducible** (accepted limitation)
+   - Stages 1 and 3 call the LLM; re-running the same PDF gives slightly
+     different results (fact counts have ranged 187-220 across runs)
+   - **`temperature=0` is not available.** Sampling parameters
+     (`temperature`/`top_p`/`top_k`) were removed on `claude-sonnet-5`; the API
+     returns 400 and `anthropic` 1.0.0 does not expose the parameter.
+     Still accepted on older models (Sonnet 4.6, Haiku 4.5)
+   - Options if this matters later: cache responses keyed on
+     (model + prompt) for byte-identical replay, or move to a model that
+     still accepts `temperature`
+   - Consequence: every metric in this file is one run's numbers, not a fixed value
+
+2. **40 unmapped facts** (13 conditions, 6 meds, 21 labs)
    - Reported by name, not hidden
    - Could preserve as uncoded FHIR (valid)
 
-2. **RxNorm codes unverified**
+3. **RxNorm codes unverified**
    - Marked as unverified in code
    - Need real RxNorm lookup
 
-3. **Confidence hardcoded 0.85** (low priority)
+4. **Confidence hardcoded 0.85** (low priority)
 
-4. **Patient resource stub** (low priority)
+5. **Patient resource stub** (low priority)
 
 ---
 

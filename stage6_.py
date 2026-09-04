@@ -23,6 +23,10 @@ from pathlib import Path
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
+# Bumped whenever the table layout changes; a database at an older version is
+# backed up and rebuilt rather than silently queried with the wrong columns.
+SCHEMA_VERSION = 2
+
 # Rows are deleted parent-last so foreign keys stay satisfied.
 TABLES_CHILD_FIRST = ('observations', 'conditions', 'medications',
                       'encounters', 'patients')
@@ -33,9 +37,15 @@ def reference_id(resource, field):
     return (resource.get(field, {}) or {}).get('reference', '').split('/')[-1] or None
 
 
+def first_coding(concept):
+    """The first coding from a CodeableConcept, as (code, system)."""
+    coding = ((concept or {}).get('coding') or [{}])[0]
+    return coding.get('code'), coding.get('system')
+
+
 def first_coding_code(concept):
     """The first coding's code from a CodeableConcept, or None."""
-    return ((concept or {}).get('coding') or [{}])[0].get('code')
+    return first_coding(concept)[0]
 
 
 def as_text(value):
@@ -51,9 +61,9 @@ class FHIRStore:
         self.db_path = Path(db_path)
 
         if self.needs_rebuild():
-            backup = self.db_path.with_suffix('.legacy.bak')
+            backup = self.backup_path()
             shutil.copy2(self.db_path, backup)
-            print(f"! Existing database uses the old unscoped schema.")
+            print(f"! Database schema v{self.stored_version()} predates v{SCHEMA_VERSION}.")
             print(f"  Backed up to {backup.name}, then rebuilt.")
             self.rebuild = True
         else:
@@ -64,8 +74,29 @@ class FHIRStore:
         self.cursor = self.conn.cursor()
         self.setup_tables()
 
+    def backup_path(self):
+        """
+        A backup filename that does not already exist.
+
+        Each rebuild keeps its own copy; overwriting one backup with the next
+        would discard whatever the first one was protecting.
+        """
+        candidate = self.db_path.with_suffix('.legacy.bak')
+        index = 2
+        while candidate.exists():
+            candidate = self.db_path.with_suffix(f'.legacy{index}.bak')
+            index += 1
+        return candidate
+
+    def stored_version(self):
+        """The schema version recorded in the database file, or 0 if none."""
+        if not self.db_path.exists():
+            return SCHEMA_VERSION
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            return conn.execute('PRAGMA user_version').fetchone()[0]
+
     def needs_rebuild(self):
-        """True when an existing database lacks the source column or encounters."""
+        """True when an existing database was built by an older schema version."""
         if not self.db_path.exists():
             return False
         with closing(sqlite3.connect(self.db_path)) as conn:
@@ -73,10 +104,7 @@ class FHIRStore:
                 "SELECT name FROM sqlite_master WHERE type='table'")}
             if not tables:
                 return False
-            if 'encounters' not in tables:
-                return True
-            columns = {row[1] for row in conn.execute("PRAGMA table_info(patients)")}
-            return 'source' not in columns
+        return self.stored_version() != SCHEMA_VERSION
 
     def setup_tables(self):
         """Create database tables."""
@@ -113,6 +141,7 @@ class FHIRStore:
                 patient_id TEXT,
                 encounter_id TEXT,
                 code TEXT,
+                system TEXT,
                 display TEXT,
                 source TEXT,
                 FOREIGN KEY (patient_id) REFERENCES patients(id)
@@ -125,6 +154,7 @@ class FHIRStore:
                 patient_id TEXT,
                 encounter_id TEXT,
                 code TEXT,
+                system TEXT,
                 display TEXT,
                 value REAL,
                 unit TEXT,
@@ -141,12 +171,15 @@ class FHIRStore:
                 patient_id TEXT,
                 drug_name TEXT,
                 code TEXT,
+                system TEXT,
                 dose TEXT,
                 status TEXT,
                 source TEXT,
                 FOREIGN KEY (patient_id) REFERENCES patients(id)
             )
         ''')
+
+        self.cursor.execute(f'PRAGMA user_version = {SCHEMA_VERSION}')
 
         for table in ('encounters', 'conditions', 'observations', 'medications'):
             self.cursor.execute(
@@ -224,13 +257,13 @@ class FHIRStore:
 
     def store_condition(self, resource, source):
         """Store condition."""
+        code, system = first_coding(resource.get('code'))
         self.cursor.execute('''
             INSERT OR REPLACE INTO conditions
-                (id, patient_id, encounter_id, code, display, source)
-            VALUES (?, ?, ?, ?, ?, ?)
+                (id, patient_id, encounter_id, code, system, display, source)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
         ''', (resource.get('id'), reference_id(resource, 'subject'),
-              reference_id(resource, 'encounter'),
-              first_coding_code(resource.get('code')),
+              reference_id(resource, 'encounter'), code, system,
               as_text(resource.get('code', {}).get('text')), source))
 
     def store_observation(self, resource, source):
@@ -263,13 +296,13 @@ class FHIRStore:
                              f"{component_quantity.get('unit', '')}".strip())
             value_text = "; ".join(parts)
 
+        code, system = first_coding(resource.get('code'))
         self.cursor.execute('''
             INSERT OR REPLACE INTO observations
-                (id, patient_id, encounter_id, code, display, value, unit, value_text, date, source)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (id, patient_id, encounter_id, code, system, display, value, unit, value_text, date, source)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (resource.get('id'), reference_id(resource, 'subject'),
-              reference_id(resource, 'encounter'),
-              first_coding_code(resource.get('code')),
+              reference_id(resource, 'encounter'), code, system,
               as_text(resource.get('code', {}).get('text')),
               value, unit, value_text,
               resource.get('effectiveDateTime'), source))
@@ -281,12 +314,13 @@ class FHIRStore:
         if resource.get('dosage'):
             dose = as_text(resource['dosage'][0].get('text'))
 
+        code, system = first_coding(concept)
         self.cursor.execute('''
             INSERT OR REPLACE INTO medications
-                (id, patient_id, drug_name, code, dose, status, source)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                (id, patient_id, drug_name, code, system, dose, status, source)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ''', (resource.get('id'), reference_id(resource, 'subject'),
-              as_text(concept.get('text')), first_coding_code(concept),
+              as_text(concept.get('text')), code, system,
               dose, resource.get('status', 'unknown'), source))
 
     # Demo Queries
