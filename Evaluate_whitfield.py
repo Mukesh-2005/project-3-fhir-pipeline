@@ -8,6 +8,11 @@ import json
 import sys
 from pathlib import Path
 
+# Keep the checkmarks printable when stdout is redirected to a file or a
+# pipe, which on Windows defaults to cp1252 and cannot encode them.
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+
 def evaluate_fhir_only(fhir_file):
     """Evaluate FHIR output without ground truth."""
     
@@ -34,13 +39,19 @@ def evaluate_fhir_only(fhir_file):
         return False
     
     validation = data.get('validation', {})
-    if validation.get('valid'):
-        print("Status: ✓ PASS - Valid FHIR R4")
+    validator = validation.get('validator', 'unknown')
+    if validation.get('valid') is True:
+        print(f"Status: ✓ PASS - Valid FHIR R4B  (checked by {validator})")
+    elif validation.get('valid') is None:
+        # No validator installed: unvalidated is not the same as valid.
+        print("Status: ? NOT VALIDATED - no validator available")
+        for error in validation.get('errors', [])[:3]:
+            print(f"  - {error}")
     else:
-        print("Status: ⚠️  Invalid FHIR")
-        if validation.get('errors'):
-            for error in validation.get('errors', [])[:3]:
-                print(f"  - {error}")
+        count = validation.get('error_count', len(validation.get('errors', [])))
+        print(f"Status: ⚠️  INVALID - {count} error(s)  (checked by {validator})")
+        for error in validation.get('errors', [])[:3]:
+            print(f"  - {error}")
     
     # Count resources
     print("\n[RESOURCE COUNTS]")
@@ -75,7 +86,7 @@ def evaluate_fhir_only(fhir_file):
     
     print(f"  Medications: {len(meds)}")
     for m in meds[:3]:
-        text = m.get('resource', {}).get('medicationCodeableConcept', {}).get('coding', [{}])[0].get('display', 'Unknown')
+        text = m.get('resource', {}).get('medicationCodeableConcept', {}).get('text', 'Unknown')
         print(f"    - {text}")
     
     print("\n" + "="*70)

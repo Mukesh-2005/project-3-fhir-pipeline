@@ -147,7 +147,7 @@ def print_results(results):
 if __name__ == '__main__':
     
     if len(sys.argv) < 2:
-        pdf_file = 'test_patient_1.pdf'
+        pdf_file = 'whitfield.pdf'
     else:
         pdf_file = sys.argv[1]
     

@@ -38,7 +38,7 @@ def extract_tables(text):
     return tables
 
 if __name__ == '__main__':
-    pdf_file = sys.argv[1] if len(sys.argv) > 1 else 'test_patient_1.pdf'
+    pdf_file = sys.argv[1] if len(sys.argv) > 1 else 'whitfield.pdf'
     seg_file = pdf_file.replace('.pdf', '_segmentation.json')
     
     if not Path(pdf_file).exists() or not Path(seg_file).exists():

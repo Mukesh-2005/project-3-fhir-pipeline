@@ -4,280 +4,332 @@ STAGE 4: TERMINOLOGY NORMALIZATION ONLY
 Does NOT call any other stages.
 Input: _entities.json
 Output: _coded.json
+
+Matching is whole-word and longest-match-wins, so "insertional activity" no
+longer matches the key "ct" and "cervical strain" beats the bare key "strain".
+Every entry carries the code system it belongs to, so a SNOMED concept is never
+published under the ICD-10 URL.
+
+The mappings below are a best-effort demonstration dictionary, not a certified
+code set; a clinical coder should review them before any real use.
 """
 
 import json
+import re
 import sys
 from pathlib import Path
 
-# Expanded medical code mappings - includes Whitfield terms
+ICD10 = 'http://hl7.org/fhir/sid/icd-10-cm'
+SNOMED = 'http://snomed.info/sct'
+LOINC = 'http://loinc.org'
+RXNORM = 'http://www.nlm.nih.gov/research/umls/rxnorm'
+
+# term -> (code, system)
 CONDITION_CODES = {
-    # Neck/back pain conditions
-    'posterior neck pain': 'M54.2',
-    'neck pain': 'M54.2',
-    'cervical pain': 'M54.2',
-    'mid back pain': 'M54.3',
-    'lower back pain': 'M54.5',
-    'low back pain': 'M54.5',
-    'back pain': 'M54.5',
-    'lumbosacral pain': 'M54.5',
-    'leg pain': 'M25.5',
-    'right leg pain': 'M25.5',
-    'pain radiating down right leg': 'M25.5',
-    'pain with weight bearing on right leg': 'M25.5',
-    'radiating pain': 'M25.5',
-    'calf pain': 'M25.5',
-    'foot pain': 'M25.5',
-    'tingling': 'G89.29',
-    'paresthesia': 'G89.29',
-    'numbness': 'G89.29',
-    'foot numbness': 'G89.29',
-    'foot tingling': 'G89.29',
-    'weakness': 'M62.81',
-    'heel weakness': 'M62.81',
-    'ehl weakness': 'M62.81',
-    
-    # Disc/spine conditions
-    'degenerative disc disease': 'M47.9',
-    'disc disease': 'M47.9',
-    'disc space narrowing': 'M47.9',
-    'disc desiccation': 'M47.9',
-    'disc bulge': 'M51.2',
-    'disc protrusion': 'M51.2',
-    'disc herniation': 'M51.2',
-    'facet arthropathy': 'M47.9',
-    'facet arthritis': 'M47.9',
-    'facet hypertrophy': 'M47.9',
-    'stenosis': 'M48.0',
-    'lateral recess stenosis': 'M48.0',
-    'ligamentum flavum thickening': 'M48.0',
-    
-    # Strain/trauma
-    'acute lumbosacral strain': 'M54.5',
-    'strain': 'M54.5',
-    'acute strain': 'M54.5',
-    'motor vehicle collision': 'V00-V99',
-    'motor vehicle accident': 'V00-V99',
-    'collision': 'V00-V99',
-    'rear-end collision': 'V00-V99',
-    'trauma': 'T00-T88',
-    
-    # Radiculopathy/dermatome
-    'radiculopathy': 'M54.1',
-    'radicular': 'M54.1',
-    'l5 radiculopathy': 'M54.1',
-    'lumbosacral radiculopathy': 'M54.1',
-    'l5 dermatome': 'M54.1',
-    'sensory deficit': 'G89.29',
-    'l5 sensory deficit': 'G89.29',
-    
-    # Post-op conditions
-    'post-op': 'Z98.8',
-    'post-operative': 'Z98.8',
-    'rotator cuff repair': 'Z98.8',
-    'post-operative low back pain': 'M54.5',
-    'post-operative rehabilitation': 'Z98.8',
-    'status post': 'Z98.8',
-    'residual': 'Z98.8',
-    
-    # Gait abnormalities
-    'antalgic gait': 'R26.1',
-    'gait abnormality': 'R26.1',
-    'weak heel walking': 'R26.1',
-    'catching sensation': 'M25.6',
-    
-    # Standard conditions
-    'denervation': 'M63.8',
-    'active denervation': 'M63.8',
-    'neuropathy': 'G60.9',
-    'peripheral neuropathy': 'G60.9',
-    'polyneuropathy': 'G61.9',
-    'entrapment neuropathy': 'G56.9',
-    'plexopathy': 'G54.9',
-    'cervical': 'M54.2',
-    'lumbar': 'M54.5',
-    'viral sinusitis': '444814009',
-    'medication review': '314529007',
-    'sinusitis': '444814009',
-    'diabetes': 'E11.9',
-    'hypertension': 'I10',
-    'arthritis': 'M19.90',
-    'osteoarthritis': 'M19.90',
-    'obesity': 'E66.9',
+    # Cervical / neck
+    'neck pain': ('M54.2', ICD10),
+    'posterior neck pain': ('M54.2', ICD10),
+    'cervical pain': ('M54.2', ICD10),
+    'cervicalgia': ('M54.2', ICD10),
+    'cervical midline tenderness': ('M54.2', ICD10),
+    # A strain is an injury, not the pain code M54.5 the old dictionary used.
+    'cervical strain': ('S16.1XXA', ICD10),
+    'acute cervical strain': ('S16.1XXA', ICD10),
+    'neck strain': ('S16.1XXA', ICD10),
+    'cervical sprain': ('S13.4XXA', ICD10),
+    'whiplash': ('S13.4XXA', ICD10),
+
+    # Thoracic / lumbar
+    # M54.5 is a category header and is not itself billable; M54.50 is.
+    'low back pain': ('M54.50', ICD10),
+    'lower back pain': ('M54.50', ICD10),
+    'lumbago': ('M54.50', ICD10),
+    'post-operative low back pain': ('M54.50', ICD10),
+    'back pain': ('M54.9', ICD10),
+    'mid back pain': ('M54.6', ICD10),
+    'thoracic pain': ('M54.6', ICD10),
+    'lumbar strain': ('S39.012A', ICD10),
+    'lumbosacral strain': ('S39.012A', ICD10),
+    'acute lumbosacral strain': ('S39.012A', ICD10),
+    'lumbar paraspinal tenderness': ('M54.50', ICD10),
+
+    # Radiculopathy
+    'radiculopathy': ('M54.10', ICD10),
+    'cervical radiculopathy': ('M54.12', ICD10),
+    'lumbar radiculopathy': ('M54.16', ICD10),
+    'l5 radiculopathy': ('M54.16', ICD10),
+    'lumbosacral radiculopathy': ('M54.17', ICD10),
+    'radicular pain': ('M54.10', ICD10),
+    'sciatica': ('M54.30', ICD10),
+
+    # Disc and facet
+    'degenerative disc disease': ('M51.36', ICD10),
+    'disc degeneration': ('M51.36', ICD10),
+    'disc desiccation': ('M51.36', ICD10),
+    'disc disease': ('M51.9', ICD10),
+    'disc bulge': ('M51.26', ICD10),
+    'disc protrusion': ('M51.26', ICD10),
+    'disc herniation': ('M51.26', ICD10),
+    'disc displacement': ('M51.26', ICD10),
+    'facet arthropathy': ('M47.816', ICD10),
+    'facet arthritis': ('M47.816', ICD10),
+    'facet hypertrophy': ('M47.816', ICD10),
+    'spondylosis': ('M47.816', ICD10),
+    'spinal stenosis': ('M48.00', ICD10),
+    'lumbar stenosis': ('M48.06', ICD10),
+    'lateral recess stenosis': ('M48.06', ICD10),
+    'ligamentum flavum thickening': ('M48.06', ICD10),
+
+    # Neurologic findings
+    'paresthesia': ('R20.2', ICD10),
+    'tingling': ('R20.2', ICD10),
+    'numbness': ('R20.0', ICD10),
+    'sensory deficit': ('R20.8', ICD10),
+    'weakness': ('M62.81', ICD10),
+    'muscle weakness': ('M62.81', ICD10),
+    'ehl weakness': ('M62.81', ICD10),
+    'neuropathy': ('G60.9', ICD10),
+    'peripheral neuropathy': ('G60.9', ICD10),
+    'polyneuropathy': ('G61.9', ICD10),
+    'entrapment neuropathy': ('G56.90', ICD10),
+    'plexopathy': ('G54.9', ICD10),
+
+    # Gait
+    'antalgic gait': ('R26.89', ICD10),
+    'gait abnormality': ('R26.9', ICD10),
+    'difficulty walking': ('R26.2', ICD10),
+
+    # External cause. V00-V99 and T00-T88 are ICD-10 chapter RANGES, not codes,
+    # and were rejected as codes by any real consumer; V89.2XXA is the code for
+    # an unspecified motor-vehicle traffic accident.
+    'motor vehicle collision': ('V89.2XXA', ICD10),
+    'motor vehicle accident': ('V89.2XXA', ICD10),
+    'rear-end collision': ('V89.2XXA', ICD10),
+
+    # Post-procedural
+    'post-operative': ('Z98.890', ICD10),
+    'status post': ('Z98.890', ICD10),
+    'rotator cuff repair': ('Z98.890', ICD10),
+    'post-operative rehabilitation': ('Z98.890', ICD10),
+
+    # General
+    'diabetes': ('E11.9', ICD10),
+    'hypertension': ('I10', ICD10),
+    'osteoarthritis': ('M19.90', ICD10),
+    'arthritis': ('M19.90', ICD10),
+    'obesity': ('E66.9', ICD10),
+    'sinusitis': ('J01.90', ICD10),
+    # SNOMED concepts, now published under the SNOMED system rather than ICD-10.
+    'viral sinusitis': ('444814009', SNOMED),
+    'medication review': ('314529007', SNOMED),
 }
 
+# RxNorm ingredient codes carried over from the original dictionary. These have
+# NOT been re-verified against RxNorm and several look doubtful; treat them as
+# placeholders pending a proper RxNorm lookup.
 MEDICATION_CODES = {
-    'ketorolac': '6109',
-    'methocarbamol': '6916',
-    'ondansetron': '31307',
-    'docusate': '3442',
-    'docusate sodium': '3442',
-    'neuropathic medication': '5856',
-    'anti-inflammatory': '6109',
-    'anti-inflammatory medication': '6109',
-    'metformin': '6809',
-    'insulin': '5856',
-    'lisinopril': '25481',
-    'aspirin': '17778',
-    'acetaminophen': '161',
-    'ibuprofen': '5640',
-    'naproxen': '6956',
-    'tramadol': '10689',
-    'gabapentin': '3623',
-    'pregabalin': '225386',
-    'morphine': '7052',
-    'hydrocodone': '5489',
-    'oral medication': '5856',
+    'ketorolac': ('6109', RXNORM),
+    'methocarbamol': ('6916', RXNORM),
+    'ondansetron': ('31307', RXNORM),
+    'docusate': ('3442', RXNORM),
+    'docusate sodium': ('3442', RXNORM),
+    'metformin': ('6809', RXNORM),
+    'insulin': ('5856', RXNORM),
+    'lisinopril': ('25481', RXNORM),
+    'aspirin': ('17778', RXNORM),
+    'acetaminophen': ('161', RXNORM),
+    'ibuprofen': ('5640', RXNORM),
+    'naproxen': ('6956', RXNORM),
+    'tramadol': ('10689', RXNORM),
+    'gabapentin': ('3623', RXNORM),
+    'pregabalin': ('225386', RXNORM),
+    'morphine': ('7052', RXNORM),
+    'hydrocodone': ('5489', RXNORM),
+    'codeine': ('2670', RXNORM),
+    'cyclobenzaprine': ('21241', RXNORM),
+    'prednisone': ('8640', RXNORM),
+    'diazepam': ('3322', RXNORM),
 }
 
 LAB_CODES = {
     # Vital signs
-    'bp': '55284-4',
-    'blood pressure': '55284-4',
-    'hr': '8867-4',
-    'heart rate': '8867-4',
-    'rr': '9279-1',
-    'respiratory rate': '9279-1',
-    'spo2': '59408-5',
-    'oxygen saturation': '59408-5',
-    'gcs': '9269-2',
-    'glasgow coma': '9269-2',
-    'temp': '8310-5',
-    'temperature': '8310-5',
-    
-    # Imaging
-    'radiographs': '18748-4',
-    'x-ray': '18748-4',
-    'ed radiographs': '18748-4',
-    'lumbar radiographs': '18748-4',
-    'ct': '18748-4',
-    'ct scan': '18748-4',
-    'mri': '18748-4',
-    'imaging': '18748-4',
-    
-    # Physical exam findings
-    'lumbar flexion': '89264-0',
-    'lumbar extension': '89264-0',
-    'range of motion': '89264-0',
-    'rom': '89264-0',
-    'shoulder flexion': '89264-0',
-    'external rotation': '89264-0',
-    'mmt': '50373-0',
-    'manual muscle test': '50373-0',
-    'supraspinatus': '50373-0',
-    'ehl strength': '50373-0',
-    'strength': '50373-0',
-    'dash score': '42838-2',
-    'functional assessment': '42838-2',
-    
-    # EMG/NCS
-    'emg': '51737-7',
-    'electromyography': '51737-7',
-    'emg/ncs': '51737-7',
-    'nerve conduction': '51737-7',
-    'peroneal motor': '51737-7',
-    'tibial motor': '51737-7',
-    'sural sensory': '51737-7',
-    'h-reflex': '51737-7',
-    'needle electromyography': '51737-7',
-    'fibrillations': '51737-7',
-    'positive sharp waves': '51737-7',
-    'recruitment': '51737-7',
-    'distal latency': '51737-7',
-    'amplitude': '51737-7',
-    'conduction velocity': '51737-7',
-    
+    'bp': ('85354-9', LOINC),
+    'blood pressure': ('85354-9', LOINC),
+    'hr': ('8867-4', LOINC),
+    'heart rate': ('8867-4', LOINC),
+    'pulse': ('8867-4', LOINC),
+    'rr': ('9279-1', LOINC),
+    'respiratory rate': ('9279-1', LOINC),
+    'spo2': ('59408-5', LOINC),
+    'oxygen saturation': ('59408-5', LOINC),
+    'gcs': ('9269-2', LOINC),
+    'glasgow coma': ('9269-2', LOINC),
+    't': ('8310-5', LOINC),
+    'temp': ('8310-5', LOINC),
+    'temperature': ('8310-5', LOINC),
+    'ht': ('8302-2', LOINC),
+    'height': ('8302-2', LOINC),
+    'body height': ('8302-2', LOINC),
+    'wt': ('29463-7', LOINC),
+    'weight': ('29463-7', LOINC),
+    'body weight': ('29463-7', LOINC),
+    'bmi': ('39156-5', LOINC),
+    'body mass index': ('39156-5', LOINC),
+    'pain': ('72514-3', LOINC),
+    'pain severity': ('72514-3', LOINC),
+
+    # Imaging. "ct" only matches the standalone word now, not "activity".
+    'x-ray': ('43468-8', LOINC),
+    'radiographs': ('43468-8', LOINC),
+    'ed radiographs': ('43468-8', LOINC),
+    'lumbar radiographs': ('43468-8', LOINC),
+    'ct': ('24627-2', LOINC),
+    'ct scan': ('24627-2', LOINC),
+    'mri': ('24676-9', LOINC),
+    'imaging': ('18748-4', LOINC),
+
+    # Physical exam
+    'range of motion': ('89264-0', LOINC),
+    'rom': ('89264-0', LOINC),
+    'lumbar flexion': ('89264-0', LOINC),
+    'lumbar extension': ('89264-0', LOINC),
+    'shoulder flexion': ('89264-0', LOINC),
+    'shoulder abduction': ('89264-0', LOINC),
+    'external rotation': ('89264-0', LOINC),
+    'mmt': ('50373-0', LOINC),
+    'manual muscle test': ('50373-0', LOINC),
+    'strength': ('50373-0', LOINC),
+    'supraspinatus': ('50373-0', LOINC),
+    'dash score': ('42838-2', LOINC),
+    'functional assessment': ('42838-2', LOINC),
+
+    # EMG / NCS
+    'emg': ('51737-7', LOINC),
+    'emg/ncs': ('51737-7', LOINC),
+    'electromyography': ('51737-7', LOINC),
+    'needle electromyography': ('51737-7', LOINC),
+    'nerve conduction': ('51737-7', LOINC),
+    'peroneal motor': ('51737-7', LOINC),
+    'tibial motor': ('51737-7', LOINC),
+    'sural sensory': ('51737-7', LOINC),
+    'h-reflex': ('51737-7', LOINC),
+    'distal latency': ('51737-7', LOINC),
+    'conduction velocity': ('51737-7', LOINC),
+
     # Standard labs
-    'glucose': '2345-7',
-    'hemoglobin': '718-7',
-    'hematocrit': '4544-3',
-    'potassium': '2823-3',
-    'sodium': '2951-2',
-    'creatinine': '2160-0',
-    'body height': '8302-2',
-    'height': '8302-2',
-    'body weight': '29463-7',
-    'weight': '29463-7',
-    'body mass index': '39156-5',
-    'bmi': '39156-5',
-    'pain': '72514-3',
-    'pain severity': '72514-3',
+    'glucose': ('2345-7', LOINC),
+    'hemoglobin': ('718-7', LOINC),
+    'hematocrit': ('4544-3', LOINC),
+    'potassium': ('2823-3', LOINC),
+    'sodium': ('2951-2', LOINC),
+    'creatinine': ('2160-0', LOINC),
 }
 
-def map_term(term, mapping):
-    """Smart string matching for codes."""
-    # Handle dicts or strings
+# Word-boundary patterns, compiled once. \b will not fire inside a longer word,
+# so the key "ct" matches "CT scan" but not "insertional activity".
+_PATTERNS = {}
+
+
+def pattern_for(key):
+    """Cached whole-word pattern for a dictionary key."""
+    if key not in _PATTERNS:
+        _PATTERNS[key] = re.compile(r'(?<!\w)' + re.escape(key).replace(r'\ ', r'\s+') + r'(?!\w)',
+                                    re.I)
+    return _PATTERNS[key]
+
+
+def term_text(term):
+    """The searchable string for an entity, which may arrive as a dict."""
     if isinstance(term, dict):
-        term_str = term.get('test_name') or term.get('drug_name') or term.get('substance') or str(term)
-    else:
-        term_str = str(term)
-    
-    term_lower = term_str.lower()
-    
-    # Exact match first
-    if term_lower in mapping:
-        return mapping[term_lower]
-    
-    # Substring match: check if ANY dictionary key is IN the term
-    for key, code in mapping.items():
-        if key in term_lower:
-            return code
-    
-    # Try reverse: check if term is IN any dictionary key (for partial matches)
-    for key, code in mapping.items():
-        if term_lower in key:
-            return code
-    
-    return None
+        return str(term.get('test_name') or term.get('drug_name')
+                   or term.get('substance') or term.get('name') or term)
+    return str(term)
+
+
+def map_term(term, mapping):
+    """
+    Map a free-text term to (code, system), or (None, None) when nothing matches.
+
+    The longest matching key wins, so a specific term beats a generic one
+    ("cervical strain" over "strain"). Ties break alphabetically so the result
+    never depends on dictionary insertion order.
+    """
+    text = re.sub(r'\s+', ' ', term_text(term)).strip()
+    if not text:
+        return None, None
+
+    matches = [key for key in mapping if pattern_for(key).search(text)]
+    if not matches:
+        return None, None
+
+    best = min(matches, key=lambda key: (-len(key), key))
+    return mapping[best]
+
+
+def code_entities(items, mapping, unmapped):
+    """Code a list of entities, recording anything that did not match."""
+    coded = []
+    for item in items:
+        code, system = map_term(item, mapping)
+        if code is None:
+            unmapped.append(term_text(item))
+        coded.append({'text': item, 'code': code, 'system': system})
+    return coded
+
 
 if __name__ == '__main__':
-    entities_file = sys.argv[1] if len(sys.argv) > 1 else 'test_patient_1_entities.json'
-    
+    entities_file = sys.argv[1] if len(sys.argv) > 1 else 'whitfield_entities.json'
+
     if not Path(entities_file).exists():
         print(f"ERROR: {entities_file} not found")
         sys.exit(1)
-    
-    with open(entities_file) as f:
+
+    with open(entities_file, encoding='utf-8') as f:
         entities = json.load(f)
-    
+
     print(f"\nSTAGE 4: Terminology Normalization\nProcessing: {entities_file}\n")
-    
+
     result = {'pdf_file': entities['pdf_file'], 'documents': []}
-    
+    unmapped_all = {'conditions': [], 'medications': [], 'labs': []}
+    total = 0
+
     for i, doc in enumerate(entities['documents'], 1):
         print(f"Document {i}: {doc['type']}...", end=" ")
-        
+
+        source = doc.get('entities', {})
         coded = {
             'type': doc['type'],
             'pages': doc['pages'],
             'entities': {
-                'conditions': [],
-                'medications': [],
-                'labs': []
-            }
+                'conditions': code_entities(source.get('conditions', []),
+                                            CONDITION_CODES, unmapped_all['conditions']),
+                'medications': code_entities(source.get('medications', []),
+                                             MEDICATION_CODES, unmapped_all['medications']),
+                'labs': code_entities(source.get('labs', []),
+                                      LAB_CODES, unmapped_all['labs']),
+            },
         }
-        
-        # Code conditions
-        for cond in doc['entities'].get('conditions', []):
-            code = map_term(cond, CONDITION_CODES)
-            coded['entities']['conditions'].append({'text': cond, 'code': code})
-        
-        # Code medications
-        for med in doc['entities'].get('medications', []):
-            code = map_term(med, MEDICATION_CODES)
-            coded['entities']['medications'].append({'text': med, 'code': code})
-        
-        # Code labs
-        for lab in doc['entities'].get('labs', []):
-            code = map_term(lab, LAB_CODES)
-            coded['entities']['labs'].append({'text': lab, 'code': code})
-        
+
+        # Carry the document date through for stage 5.
+        if doc.get('document_date'):
+            coded['document_date'] = doc['document_date']
+
+        counts = {k: len(v) for k, v in coded['entities'].items()}
+        total += sum(counts.values())
         result['documents'].append(coded)
-        print("OK")
-    
-    # Save
+        print(f"OK ({counts['conditions']}c/{counts['medications']}m/{counts['labs']}l)")
+
+    result['unmapped'] = unmapped_all
+
     output = entities_file.replace('_entities.json', '_coded.json')
-    with open(output, 'w') as f:
+    with open(output, 'w', encoding='utf-8') as f:
         json.dump(result, f, indent=2)
-    
-    print(f"\n✓ Saved: {output}\n")
+
+    unmapped_count = sum(len(v) for v in unmapped_all.values())
+    mapped = total - unmapped_count
+    print(f"\nMapped {mapped}/{total} facts ({100 * mapped // total if total else 0}%)")
+    for kind, terms in unmapped_all.items():
+        if terms:
+            # These are dropped by stage 5, which builds no resource without a code.
+            print(f"  {len(terms)} {kind} unmapped, e.g. {terms[0][:60]!r}")
+    print(f"\nSaved: {output}\n")

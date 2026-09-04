@@ -11,8 +11,13 @@ import sys
 from pathlib import Path
 from datetime import datetime
 
+# Keep the checkmarks printable when stdout is redirected to a file or a
+# pipe, which on Windows defaults to cp1252 and cannot encode them.
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+
 if __name__ == '__main__':
-    fhir_file = sys.argv[1] if len(sys.argv) > 1 else 'test_patient_1_fhir.json'
+    fhir_file = sys.argv[1] if len(sys.argv) > 1 else 'whitfield_fhir.json'
     
     if not Path(fhir_file).exists():
         print(f"ERROR: {fhir_file} not found")
